@@ -84,7 +84,20 @@ func Handler(ctx context.Context, req *APIGatewayRequest) (*APIGatewayResponse, 
 		}
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, req.HTTPMethod, req.Path, bytes.NewReader([]byte(body)))
+	// Yandex API Gateway with a catch-all path template (`/{path+}`) sends
+	// the literal template in req.Path; the actual request URI is in the
+	// X-Envoy-Original-Path header. Fall back to req.Path for setups where
+	// specific paths are routed individually.
+	actualPath := req.Path
+	for _, key := range []string{"X-Envoy-Original-Path", "x-envoy-original-path"} {
+		if v, ok := req.Headers[key]; ok && v != "" {
+			actualPath = v
+			break
+		}
+	}
+	log.Printf("incoming: method=%s path=%q body_len=%d", req.HTTPMethod, actualPath, len(body))
+	_ = redactedHeaders // kept for future targeted debugging
+	httpReq, err := http.NewRequestWithContext(ctx, req.HTTPMethod, actualPath, bytes.NewReader([]byte(body)))
 	if err != nil {
 		return &APIGatewayResponse{StatusCode: 400, Body: err.Error()}, nil
 	}
@@ -120,6 +133,20 @@ func decodeB64(s string) (string, error) {
 
 // Compile-time guard against accidental JSON dependency drift.
 var _ = json.Marshal
+
+// redactedHeaders strips the auth header value for safe logging.
+func redactedHeaders(h map[string]string) map[string]string {
+	out := make(map[string]string, len(h))
+	for k, v := range h {
+		canon := http.CanonicalHeaderKey(k)
+		if canon == "X-S21-Token" || canon == "Authorization" {
+			out[canon] = "<redacted>"
+			continue
+		}
+		out[canon] = v
+	}
+	return out
+}
 
 // main is a stub so `go build` works. Yandex's Go runtime invokes Handler
 // via reflection without ever calling main.
