@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/arseniisemenow/ttbot-repo-placeholder-3/pkg/store"
 )
@@ -16,6 +17,7 @@ type Store struct {
 	mu        sync.Mutex
 	users     map[int64]store.User
 	nicknames map[string]store.NicknameCacheEntry
+	apiKeys   map[string]store.APIKey // keyed by KeyHash
 }
 
 // New returns an empty memstore.
@@ -23,6 +25,7 @@ func New() *Store {
 	return &Store{
 		users:     map[int64]store.User{},
 		nicknames: map[string]store.NicknameCacheEntry{},
+		apiKeys:   map[string]store.APIKey{},
 	}
 }
 
@@ -31,6 +34,7 @@ func (s *Store) Close() error { return nil }
 
 func (s *Store) Users() store.UserRepo                  { return userRepo{s} }
 func (s *Store) NicknameCache() store.NicknameCacheRepo { return cacheRepo{s} }
+func (s *Store) APIKeys() store.APIKeyRepo              { return apiKeyRepo{s} }
 
 // ---------------- users ----------------
 
@@ -117,4 +121,70 @@ func (r cacheRepo) Upsert(_ context.Context, e store.NicknameCacheEntry) error {
 	defer r.s.mu.Unlock()
 	r.s.nicknames[strings.ToLower(e.Nickname)] = e
 	return nil
+}
+
+// ---------------- api keys ----------------
+
+type apiKeyRepo struct{ s *Store }
+
+func (r apiKeyRepo) GetByHash(_ context.Context, h string) (store.APIKey, error) {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	k, ok := r.s.apiKeys[h]
+	if !ok {
+		return store.APIKey{}, store.ErrNotFound
+	}
+	return k, nil
+}
+
+func (r apiKeyRepo) Insert(_ context.Context, k store.APIKey) error {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	for _, existing := range r.s.apiKeys {
+		if existing.RevokedAt != nil {
+			continue
+		}
+		if existing.Name == k.Name {
+			return store.ErrKeyNameInUse
+		}
+		if k.CreatedByTelegramID != 0 && existing.CreatedByTelegramID == k.CreatedByTelegramID {
+			return store.ErrCreatorHasActiveKey
+		}
+	}
+	r.s.apiKeys[k.KeyHash] = k
+	return nil
+}
+
+func (r apiKeyRepo) RevokeByName(_ context.Context, name string, by int64, at time.Time) error {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	for hash, k := range r.s.apiKeys {
+		if k.RevokedAt != nil || k.Name != name {
+			continue
+		}
+		if by != 0 && k.CreatedByTelegramID != by {
+			continue
+		}
+		atCopy := at.UTC()
+		k.RevokedAt = &atCopy
+		r.s.apiKeys[hash] = k
+		return nil
+	}
+	return store.ErrNotFound
+}
+
+func (r apiKeyRepo) List(_ context.Context) ([]store.APIKey, error) {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	out := make([]store.APIKey, 0, len(r.s.apiKeys))
+	for _, k := range r.s.apiKeys {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
 }

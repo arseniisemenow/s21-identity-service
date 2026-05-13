@@ -36,6 +36,9 @@ func newWorld(t *testing.T) *world {
 	})
 	sm.SetAdminPassword("evangelm", "secret")
 	srv := api.New(st, sm)
+	// Tests run over plain HTTP via httptest, and tests don't issue API keys.
+	srv.EnforceHTTPS = false
+	srv.EnforceAPIKey = false
 	srv.Now = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)

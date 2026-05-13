@@ -62,6 +62,11 @@ resource "yandex_function" "identity_service" {
     YDB_ENDPOINT      = yandex_ydb_database_serverless.db.ydb_full_endpoint
     YDB_AUTH_METADATA = "true"
     LOG_LEVEL         = var.log_level
+    # API_KEY_ENFORCE: "false" puts the X-Api-Key check into dry-run mode
+    # (logs but accepts). Any other value (incl. unset) → enforce. Operator
+    # sets this to "false" for the bootstrap deploy, then to "true" once
+    # every client has its API key.
+    API_KEY_ENFORCE = var.api_key_enforce
   }
 }
 

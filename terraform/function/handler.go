@@ -62,6 +62,13 @@ func bootstrap() {
 		st = memstore.New()
 	}
 	srv = api.New(st, s21c)
+	// API_KEY_ENFORCE=false → bootstrap mode (logs warnings, accepts requests
+	// without a key). Any other value (including empty) → enforce. Operator
+	// flips this once all clients have been issued keys and have them in env.
+	if os.Getenv("API_KEY_ENFORCE") == "false" {
+		srv.EnforceAPIKey = false
+		log.Printf("api_key: starting in DRY-RUN mode (API_KEY_ENFORCE=false)")
+	}
 }
 
 // Handler is the Yandex Cloud Function entrypoint.
@@ -139,7 +146,7 @@ func redactedHeaders(h map[string]string) map[string]string {
 	out := make(map[string]string, len(h))
 	for k, v := range h {
 		canon := http.CanonicalHeaderKey(k)
-		if canon == "X-S21-Token" || canon == "Authorization" {
+		if canon == "X-S21-Token" || canon == "Authorization" || canon == "X-Api-Key" {
 			out[canon] = "<redacted>"
 			continue
 		}

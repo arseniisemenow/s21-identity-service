@@ -32,6 +32,13 @@ func Open(ctx context.Context, connectionString string) (*Store, error) {
 	return &Store{driver: d}, nil
 }
 
+// NewFromDriver wraps an externally-constructed *ydb.Driver as a Store. Used
+// by the admin CLI, which authenticates against YDB with an IAM token from
+// `yc iam create-token` rather than the in-function metadata service.
+func NewFromDriver(d *ydb.Driver) *Store {
+	return &Store{driver: d}
+}
+
 // Close shuts down the driver.
 func (s *Store) Close() error {
 	if s.driver == nil {
@@ -42,6 +49,7 @@ func (s *Store) Close() error {
 
 func (s *Store) Users() store.UserRepo                  { return userRepo{s} }
 func (s *Store) NicknameCache() store.NicknameCacheRepo { return cacheRepo{s} }
+func (s *Store) APIKeys() store.APIKeyRepo              { return apiKeyRepo{s} }
 
 func (s *Store) doTx(ctx context.Context, fn func(ctx context.Context, tx table.TransactionActor) error) error {
 	return s.driver.Table().DoTx(ctx, fn, table.WithIdempotent(),
@@ -273,4 +281,189 @@ VALUES ($n, $cid, $cn, $coal, $cat);`
 		))
 		return err
 	})
+}
+
+// ---------------- api keys ----------------
+
+type apiKeyRepo struct{ s *Store }
+
+const apiKeyColsSel = `key_hash, name, scopes, created_at, revoked_at, created_by_telegram_id`
+
+func scanAPIKey(res interface {
+	ScanNamed(...named.Value) error
+}) (store.APIKey, error) {
+	var k store.APIKey
+	var revokedAt *time.Time
+	var createdBy *uint64
+	err := res.ScanNamed(
+		named.Required("key_hash", &k.KeyHash),
+		named.Required("name", &k.Name),
+		named.Required("scopes", &k.Scopes),
+		named.Required("created_at", &k.CreatedAt),
+		named.Optional("revoked_at", &revokedAt),
+		named.Optional("created_by_telegram_id", &createdBy),
+	)
+	if err != nil {
+		return k, err
+	}
+	k.RevokedAt = revokedAt
+	if createdBy != nil {
+		k.CreatedByTelegramID = int64(*createdBy)
+	}
+	return k, nil
+}
+
+func (r apiKeyRepo) GetByHash(ctx context.Context, h string) (store.APIKey, error) {
+	var k store.APIKey
+	err := r.s.doRO(ctx, func(ctx context.Context, sess table.Session) error {
+		_, res, err := sess.Execute(ctx, table.DefaultTxControl(),
+			"DECLARE $h AS Utf8; SELECT "+apiKeyColsSel+" FROM api_keys WHERE key_hash = $h;",
+			table.NewQueryParameters(table.ValueParam("$h", types.UTF8Value(h))))
+		if err != nil {
+			return err
+		}
+		defer res.Close()
+		if err := res.NextResultSetErr(ctx); err != nil {
+			return err
+		}
+		if !res.NextRow() {
+			return store.ErrNotFound
+		}
+		k, err = scanAPIKey(res)
+		return err
+	})
+	return k, err
+}
+
+func (r apiKeyRepo) Insert(ctx context.Context, k store.APIKey) error {
+	if k.CreatedAt.IsZero() {
+		k.CreatedAt = time.Now().UTC()
+	}
+	// Atomic check-then-insert: serializable tx scans active rows for name
+	// or creator collisions, then upserts.
+	return r.s.doTx(ctx, func(ctx context.Context, tx table.TransactionActor) error {
+		// 1. Name collision.
+		res, err := tx.Execute(ctx,
+			"DECLARE $n AS Utf8; SELECT key_hash FROM api_keys WHERE name = $n AND revoked_at IS NULL LIMIT 1;",
+			table.NewQueryParameters(table.ValueParam("$n", types.UTF8Value(k.Name))))
+		if err != nil {
+			return err
+		}
+		if err := res.NextResultSetErr(ctx); err != nil {
+			_ = res.Close()
+			return err
+		}
+		if res.NextRow() {
+			_ = res.Close()
+			return store.ErrKeyNameInUse
+		}
+		_ = res.Close()
+		// 2. Creator-has-active-key, when creator is set.
+		if k.CreatedByTelegramID != 0 {
+			res, err := tx.Execute(ctx,
+				"DECLARE $tid AS Uint64; SELECT key_hash FROM api_keys WHERE created_by_telegram_id = $tid AND revoked_at IS NULL LIMIT 1;",
+				table.NewQueryParameters(table.ValueParam("$tid", types.Uint64Value(uint64(k.CreatedByTelegramID)))))
+			if err != nil {
+				return err
+			}
+			if err := res.NextResultSetErr(ctx); err != nil {
+				_ = res.Close()
+				return err
+			}
+			if res.NextRow() {
+				_ = res.Close()
+				return store.ErrCreatorHasActiveKey
+			}
+			_ = res.Close()
+		}
+		// 3. Insert.
+		var byVal types.Value = types.NullValue(types.TypeUint64)
+		if k.CreatedByTelegramID != 0 {
+			byVal = types.OptionalValue(types.Uint64Value(uint64(k.CreatedByTelegramID)))
+		}
+		const sql = `
+DECLARE $h AS Utf8;
+DECLARE $n AS Utf8;
+DECLARE $sc AS Utf8;
+DECLARE $cat AS Timestamp;
+DECLARE $by AS Uint64?;
+UPSERT INTO api_keys (key_hash, name, scopes, created_at, revoked_at, created_by_telegram_id)
+VALUES ($h, $n, $sc, $cat, NULL, $by);`
+		_, err = tx.Execute(ctx, sql, table.NewQueryParameters(
+			table.ValueParam("$h", types.UTF8Value(k.KeyHash)),
+			table.ValueParam("$n", types.UTF8Value(k.Name)),
+			table.ValueParam("$sc", types.UTF8Value(k.Scopes)),
+			table.ValueParam("$cat", types.TimestampValueFromTime(k.CreatedAt.UTC())),
+			table.ValueParam("$by", byVal),
+		))
+		return err
+	})
+}
+
+func (r apiKeyRepo) RevokeByName(ctx context.Context, name string, by int64, at time.Time) error {
+	return r.s.doTx(ctx, func(ctx context.Context, tx table.TransactionActor) error {
+		// Look up the active key with this name. Apply creator filter when
+		// by != 0 — bot-driven revoke can only touch the caller's own keys.
+		q := "DECLARE $n AS Utf8; SELECT key_hash, created_by_telegram_id FROM api_keys WHERE name = $n AND revoked_at IS NULL LIMIT 1;"
+		res, err := tx.Execute(ctx, q,
+			table.NewQueryParameters(table.ValueParam("$n", types.UTF8Value(name))))
+		if err != nil {
+			return err
+		}
+		if err := res.NextResultSetErr(ctx); err != nil {
+			_ = res.Close()
+			return err
+		}
+		if !res.NextRow() {
+			_ = res.Close()
+			return store.ErrNotFound
+		}
+		var hash string
+		var ownerOpt *uint64
+		if err := res.ScanNamed(
+			named.Required("key_hash", &hash),
+			named.Optional("created_by_telegram_id", &ownerOpt),
+		); err != nil {
+			_ = res.Close()
+			return err
+		}
+		_ = res.Close()
+		if by != 0 {
+			if ownerOpt == nil || int64(*ownerOpt) != by {
+				return store.ErrNotFound
+			}
+		}
+		_, err = tx.Execute(ctx,
+			"DECLARE $h AS Utf8; DECLARE $rat AS Timestamp; UPDATE api_keys SET revoked_at = $rat WHERE key_hash = $h;",
+			table.NewQueryParameters(
+				table.ValueParam("$h", types.UTF8Value(hash)),
+				table.ValueParam("$rat", types.TimestampValueFromTime(at.UTC())),
+			))
+		return err
+	})
+}
+
+func (r apiKeyRepo) List(ctx context.Context) ([]store.APIKey, error) {
+	var out []store.APIKey
+	err := r.s.doRO(ctx, func(ctx context.Context, sess table.Session) error {
+		_, res, err := sess.Execute(ctx, table.DefaultTxControl(),
+			"SELECT "+apiKeyColsSel+" FROM api_keys ORDER BY created_at, name;",
+			table.NewQueryParameters())
+		if err != nil {
+			return err
+		}
+		defer res.Close()
+		if err := res.NextResultSetErr(ctx); err != nil {
+			return err
+		}
+		for res.NextRow() {
+			k, err := scanAPIKey(res)
+			if err != nil {
+				return err
+			}
+			out = append(out, k)
+		}
+		return nil
+	})
+	return out, err
 }

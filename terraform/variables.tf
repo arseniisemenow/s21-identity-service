@@ -19,3 +19,9 @@ variable "log_level" {
   type        = string
   default     = "info"
 }
+
+variable "api_key_enforce" {
+  description = "X-Api-Key enforcement mode. \"false\" = dry-run (logs missing/invalid keys but accepts the request). Anything else = enforce (reject with 401). Bootstrap deploys set this to \"false\" until every client has a key; then flip to \"true\"."
+  type        = string
+  default     = "true"
+}
