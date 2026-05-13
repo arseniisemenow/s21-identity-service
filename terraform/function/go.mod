@@ -2,7 +2,7 @@ module github.com/arseniisemenow/ttbot-repo-placeholder-3/terraform/function
 
 go 1.23.0
 
-require github.com/arseniisemenow/ttbot-repo-placeholder-3 v0.1.0
+require github.com/arseniisemenow/ttbot-repo-placeholder-3 v0.2.0
 
 require (
 	github.com/arseniisemenow/s21auto-client-go v0.3.2 // indirect
