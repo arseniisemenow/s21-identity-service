@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -307,5 +308,48 @@ func TestHealth(t *testing.T) {
 	resp, raw := w.do(http.MethodGet, "/health", "", nil) // no auth
 	if resp.StatusCode != http.StatusOK || string(raw) != "ok" {
 		t.Errorf("health: %d %q", resp.StatusCode, raw)
+	}
+}
+
+// TestAuth_TokenCacheSkipsS21OnHit: once a token has been validated, the
+// next request bearing it must not call s21.Authenticate again. We prove
+// it by populating the cache via one happy request, then poisoning the
+// mock — a second request with the same token still has to succeed
+// because the cache short-circuits.
+func TestAuth_TokenCacheSkipsS21OnHit(t *testing.T) {
+	w := newWorld(t)
+
+	// First request: cache empty, mock is happy → success, cache populates.
+	resp1, _ := w.do(http.MethodGet, "/users/by_telegram/123", "evangelm:secret", nil)
+	// Anything except 401/403 (auth-related rejections) counts as "auth
+	// passed". 404 on the user is fine — we only care that authenticate()
+	// succeeded.
+	if resp1.StatusCode == http.StatusUnauthorized || resp1.StatusCode == http.StatusForbidden {
+		t.Fatalf("first request rejected at auth: %d", resp1.StatusCode)
+	}
+	if w.srv.S21Tokens.Size() != 1 {
+		t.Errorf("expected 1 cache entry after first hit, got %d", w.srv.S21Tokens.Size())
+	}
+
+	// Poison the mock: the next Authenticate call would fail. A cache hit
+	// must not reach the mock, so the request should still pass auth.
+	w.s21.FailNext("Authenticate", errors.New("s21: blow up"))
+	resp2, _ := w.do(http.MethodGet, "/users/by_telegram/123", "evangelm:secret", nil)
+	if resp2.StatusCode == http.StatusUnauthorized || resp2.StatusCode == http.StatusForbidden {
+		t.Errorf("cached token must skip S21; got auth rejection status=%d", resp2.StatusCode)
+	}
+}
+
+// TestAuth_TokenCacheDoesNotCacheFailures: a bad password gets rejected
+// every time, even on repeat — failures are never cached. We prove it by
+// asserting the bad token has not been stored.
+func TestAuth_TokenCacheDoesNotCacheFailures(t *testing.T) {
+	w := newWorld(t)
+	resp, _ := w.do(http.MethodGet, "/users/by_telegram/123", "evangelm:wrong", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on bad creds, got %d", resp.StatusCode)
+	}
+	if w.srv.S21Tokens.Size() != 0 {
+		t.Errorf("expected zero cache entries after a failed auth, got %d", w.srv.S21Tokens.Size())
 	}
 }

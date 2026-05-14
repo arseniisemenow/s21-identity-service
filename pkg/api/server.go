@@ -19,6 +19,13 @@ import (
 	"github.com/arseniisemenow/s21-identity-service/pkg/store"
 )
 
+// s21TokenCacheTTL is how long a previously-validated X-S21-Token stays
+// trusted before the next request bearing it triggers a fresh S21 round-
+// trip. Long enough to amortize the slow auth call across many requests
+// from the same client; short enough that a rotated password takes effect
+// within one day at most.
+const s21TokenCacheTTL = 24 * time.Hour
+
 // Server hosts the HTTP API. Construct with New, mount Routes onto any
 // net/http handler, or call ServeHTTP directly.
 type Server struct {
@@ -34,6 +41,11 @@ type Server struct {
 	// EnforceHTTPS gates the TLS check. When true (production), the server
 	// rejects non-HTTPS requests. Disabled in tests via SetEnforceHTTPS.
 	EnforceHTTPS bool
+
+	// S21Tokens memoizes "X-S21-Token X was accepted by S21, resolved login
+	// L, valid until T". On cache hit, authenticate() skips the slow S21
+	// DashboardHeaderGetInfo call. Process-local; cold-start refills.
+	S21Tokens *S21TokenCache
 }
 
 // New constructs a Server with both enforcement flags ON by default — the
@@ -46,6 +58,7 @@ func New(st store.Store, s21c s21.Client) *Server {
 		Now:           time.Now,
 		EnforceAPIKey: true,
 		EnforceHTTPS:  true,
+		S21Tokens:     NewS21TokenCache(s21TokenCacheTTL, time.Now),
 	}
 }
 
@@ -165,9 +178,18 @@ func matchAdminKey(p string) (string, bool) {
 
 // ---------------- auth ----------------
 
-// authenticate extracts the X-S21-Token header, parses it as "login:password",
-// and validates the pair against S21 (with cache acceleration). Returns the
+// authenticate extracts the X-S21-Token header, parses it as
+// "login:password", and validates the pair against S21. Returns the
 // resolved admin login on success.
+//
+// Performance: the S21TokenCache fronts the S21 round-trip. A token that
+// has already been validated within the last s21TokenCacheTTL skips the
+// `s.S21.Authenticate` call entirely (the cache stores only the resolved
+// login, never the password — the map key is a sha256 hash of the
+// "login:password" string).
+//
+// Failures are NEVER cached. If S21 currently rejects the creds we want
+// the next request — possibly carrying corrected creds — to retry.
 func (s *Server) authenticate(ctx context.Context, r *http.Request) (string, error) {
 	tok := r.Header.Get("X-S21-Token")
 	if tok == "" {
@@ -178,11 +200,22 @@ func (s *Server) authenticate(ctx context.Context, r *http.Request) (string, err
 		return "", errMalformedToken
 	}
 	login, password := tok[:colon], tok[colon+1:]
+
+	// Fast path: cached, fresh validation.
+	if s.S21Tokens != nil {
+		if cachedLogin, ok := s.S21Tokens.Get(tok); ok && cachedLogin == login {
+			return cachedLogin, nil
+		}
+	}
+
 	if _, err := s.S21.Authenticate(ctx, login, password); err != nil {
 		if errors.Is(err, s21.ErrInvalidCredentials) {
 			return "", errInvalidToken
 		}
 		return "", err
+	}
+	if s.S21Tokens != nil {
+		s.S21Tokens.Put(tok, login)
 	}
 	return login, nil
 }
