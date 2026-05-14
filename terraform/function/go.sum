@@ -2,8 +2,8 @@ cloud.google.com/go v0.26.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMT
 cloud.google.com/go v0.34.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/antihax/optional v1.0.0/go.mod h1:uupD/76wgC+ih3iEmQUL+0Ugr19nfwCT1kdvxnR2qWY=
-github.com/arseniisemenow/s21-identity-service v0.4.0 h1:6lqfe4OHyQEE0TzrFxt1k1QGj1OLUhz46n6ihQSN3kk=
-github.com/arseniisemenow/s21-identity-service v0.4.0/go.mod h1:vHb6AGfCIq8yqYZ8xIk4Y/eCBXqekadyVzXtIuJMWQk=
+github.com/arseniisemenow/s21-identity-service v0.5.0 h1:o9MSrYg/rehtdqQzdVV5ybXf2tP8fW7RhcgQ1qGSOuA=
+github.com/arseniisemenow/s21-identity-service v0.5.0/go.mod h1:vHb6AGfCIq8yqYZ8xIk4Y/eCBXqekadyVzXtIuJMWQk=
 github.com/arseniisemenow/s21auto-client-go v0.3.2 h1:uIGu9a1AxXIuio7L7psLku0NtLDDdwlKlYptvYAISjU=
 github.com/arseniisemenow/s21auto-client-go v0.3.2/go.mod h1:RIwItWvXTyhsKmbIDtOUAiHiahNRtlNRGY0nUS6d41Y=
 github.com/census-instrumentation/opencensus-proto v0.2.1/go.mod h1:f6KPmirojxKA12rnyqOA5BBL4O983OfeGPqjHWSTneU=
