@@ -28,8 +28,8 @@ import (
 
 	"github.com/ydb-platform/ydb-go-sdk/v3"
 
-	"github.com/arseniisemenow/ttbot-repo-placeholder-3/pkg/store"
-	"github.com/arseniisemenow/ttbot-repo-placeholder-3/pkg/store/ydbstore"
+	"github.com/arseniisemenow/s21-identity-service/pkg/store"
+	"github.com/arseniisemenow/s21-identity-service/pkg/store/ydbstore"
 )
 
 const usage = `Identity-service admin CLI.

@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arseniisemenow/ttbot-repo-placeholder-3/pkg/s21"
-	"github.com/arseniisemenow/ttbot-repo-placeholder-3/pkg/store"
+	"github.com/arseniisemenow/s21-identity-service/pkg/s21"
+	"github.com/arseniisemenow/s21-identity-service/pkg/store"
 )
 
 // Server hosts the HTTP API. Construct with New, mount Routes onto any

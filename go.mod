@@ -1,4 +1,4 @@
-module github.com/arseniisemenow/ttbot-repo-placeholder-3
+module github.com/arseniisemenow/s21-identity-service
 
 go 1.23.0
 

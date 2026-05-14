@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arseniisemenow/ttbot-repo-placeholder-3/pkg/store"
+	"github.com/arseniisemenow/s21-identity-service/pkg/store"
 )
 
 // Store is the in-memory store.

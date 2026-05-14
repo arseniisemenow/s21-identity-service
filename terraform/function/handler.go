@@ -17,11 +17,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/arseniisemenow/ttbot-repo-placeholder-3/pkg/api"
-	"github.com/arseniisemenow/ttbot-repo-placeholder-3/pkg/s21"
-	"github.com/arseniisemenow/ttbot-repo-placeholder-3/pkg/store"
-	"github.com/arseniisemenow/ttbot-repo-placeholder-3/pkg/store/memstore"
-	"github.com/arseniisemenow/ttbot-repo-placeholder-3/pkg/store/ydbstore"
+	"github.com/arseniisemenow/s21-identity-service/pkg/api"
+	"github.com/arseniisemenow/s21-identity-service/pkg/s21"
+	"github.com/arseniisemenow/s21-identity-service/pkg/store"
+	"github.com/arseniisemenow/s21-identity-service/pkg/store/memstore"
+	"github.com/arseniisemenow/s21-identity-service/pkg/store/ydbstore"
 )
 
 // APIGatewayRequest is the JSON event Yandex API Gateway hands the function.
