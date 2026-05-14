@@ -467,3 +467,35 @@ func (r apiKeyRepo) List(ctx context.Context) ([]store.APIKey, error) {
 	})
 	return out, err
 }
+
+func (r apiKeyRepo) CountByCreatorSince(ctx context.Context, by int64, since time.Time) (int, error) {
+	var count int
+	err := r.s.doRO(ctx, func(ctx context.Context, sess table.Session) error {
+		_, res, err := sess.Execute(ctx, table.DefaultTxControl(),
+			`DECLARE $by AS Uint64;
+			 DECLARE $since AS Timestamp;
+			 SELECT COUNT(*) AS c FROM api_keys
+			 WHERE created_by_telegram_id = $by AND created_at >= $since;`,
+			table.NewQueryParameters(
+				table.ValueParam("$by", types.Uint64Value(uint64(by))),
+				table.ValueParam("$since", types.TimestampValueFromTime(since.UTC())),
+			))
+		if err != nil {
+			return err
+		}
+		defer res.Close()
+		if err := res.NextResultSetErr(ctx); err != nil {
+			return err
+		}
+		if !res.NextRow() {
+			return nil
+		}
+		var c uint64
+		if err := res.ScanNamed(named.Required("c", &c)); err != nil {
+			return err
+		}
+		count = int(c)
+		return nil
+	})
+	return count, err
+}

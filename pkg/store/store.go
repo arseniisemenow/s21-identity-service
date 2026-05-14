@@ -110,6 +110,12 @@ type APIKeyRepo interface {
 	// List returns every row, active and revoked, ordered by created_at asc.
 	// Used by the CLI to show what's been issued.
 	List(ctx context.Context) ([]APIKey, error)
+	// CountByCreatorSince returns the number of keys created by
+	// `byTelegramID` whose CreatedAt is at or after `since`. Both active
+	// and revoked rows count. Used to rate-limit POST /admin/keys —
+	// without this an attacker can rapidly create-revoke-create-revoke,
+	// consuming storage and enumerating name conflicts.
+	CountByCreatorSince(ctx context.Context, byTelegramID int64, since time.Time) (int, error)
 }
 
 // UserRepo persists the (telegram_id ↔ nickname) bindings.

@@ -188,3 +188,15 @@ func (r apiKeyRepo) List(_ context.Context) ([]store.APIKey, error) {
 	})
 	return out, nil
 }
+
+func (r apiKeyRepo) CountByCreatorSince(_ context.Context, by int64, since time.Time) (int, error) {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	count := 0
+	for _, k := range r.s.apiKeys {
+		if k.CreatedByTelegramID == by && !k.CreatedAt.Before(since) {
+			count++
+		}
+	}
+	return count, nil
+}

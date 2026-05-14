@@ -201,9 +201,13 @@ func (s *Server) authenticate(ctx context.Context, r *http.Request) (string, err
 	}
 	login, password := tok[:colon], tok[colon+1:]
 
-	// Fast path: cached, fresh validation.
+	// Fast path: cached, fresh validation. The login comparison is
+	// constant-time to avoid a timing-side-channel leak of the resolved
+	// login string. (The map key is already a hash, so the cache itself
+	// doesn't leak login length / prefix — but the post-lookup equality
+	// check on the recovered plaintext login would, without this.)
 	if s.S21Tokens != nil {
-		if cachedLogin, ok := s.S21Tokens.Get(tok); ok && cachedLogin == login {
+		if cachedLogin, ok := s.S21Tokens.Get(tok); ok && constantTimeEqual(cachedLogin, login) {
 			return cachedLogin, nil
 		}
 	}
@@ -299,28 +303,31 @@ func (s *Server) authenticateAPIKey(ctx context.Context, r *http.Request, requir
 	return &row, nil
 }
 
-// authorize runs the full request gate: HTTPS (already enforced upstream in
-// ServeHTTP), API key (with scope), and S21 token. Returns the matched S21
-// admin login on success — needed by handlePutByTelegram for downstream
-// S21 calls. Writes the appropriate error response and returns ("", false)
-// on failure; caller just returns after.
-func (s *Server) authorize(w http.ResponseWriter, r *http.Request, requiredScope string) (string, bool) {
-	if _, err := s.authenticateAPIKey(r.Context(), r, requiredScope); err != nil {
-		s.writeAuthError(w, err)
-		return "", false
+// authorize runs the full request gate: HTTPS (already enforced upstream
+// in ServeHTTP), API key (with scope), and S21 token. Returns the matched
+// API key row and the S21 admin login on success. The API key row is
+// useful to callers that need to check additional scopes (e.g. "admin");
+// the login is used by handlePutByTelegram for downstream S21 calls.
+// Writes the appropriate error response and returns (nil, "", false) on
+// failure; caller just returns after.
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, requiredScope string) (*store.APIKey, string, bool) {
+	row, err := s.authenticateAPIKey(r.Context(), r, requiredScope)
+	if err != nil {
+		s.writeAuthError(w, r, err)
+		return nil, "", false
 	}
 	adminLogin, err := s.authenticate(r.Context(), r)
 	if err != nil {
-		s.writeAuthError(w, err)
-		return "", false
+		s.writeAuthError(w, r, err)
+		return nil, "", false
 	}
-	return adminLogin, true
+	return row, adminLogin, true
 }
 
 // ---------------- handlers ----------------
 
 func (s *Server) handleGetByTelegram(w http.ResponseWriter, r *http.Request, tid int64) {
-	if _, ok := s.authorize(w, r, "read"); !ok {
+	if _, _, ok := s.authorize(w, r, "read"); !ok {
 		return
 	}
 	row, err := s.Store.Users().GetByTelegramID(r.Context(), tid)
@@ -329,14 +336,14 @@ func (s *Server) handleGetByTelegram(w http.ResponseWriter, r *http.Request, tid
 		return
 	}
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		s.writeInternalError(w, r, err)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, userFromStore(row))
 }
 
 func (s *Server) handleLookupTelegramBatch(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorize(w, r, "read"); !ok {
+	if _, _, ok := s.authorize(w, r, "read"); !ok {
 		return
 	}
 	var req LookupTelegramBatchRequest
@@ -350,7 +357,7 @@ func (s *Server) handleLookupTelegramBatch(w http.ResponseWriter, r *http.Reques
 	}
 	rows, err := s.Store.Users().GetByTelegramIDs(r.Context(), req.TelegramIDs)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		s.writeInternalError(w, r, err)
 		return
 	}
 	out := LookupTelegramBatchResponse{Users: make([]User, 0, len(rows))}
@@ -361,12 +368,12 @@ func (s *Server) handleLookupTelegramBatch(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleListByNickname(w http.ResponseWriter, r *http.Request, nick string) {
-	if _, ok := s.authorize(w, r, "read"); !ok {
+	if _, _, ok := s.authorize(w, r, "read"); !ok {
 		return
 	}
 	rows, err := s.Store.Users().ListByNickname(r.Context(), nick)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		s.writeInternalError(w, r, err)
 		return
 	}
 	out := ListResponse{Users: make([]User, 0, len(rows))}
@@ -377,7 +384,7 @@ func (s *Server) handleListByNickname(w http.ResponseWriter, r *http.Request, ni
 }
 
 func (s *Server) handlePutByTelegram(w http.ResponseWriter, r *http.Request, tid int64) {
-	adminLogin, ok := s.authorize(w, r, "write")
+	_, adminLogin, ok := s.authorize(w, r, "write")
 	if !ok {
 		return
 	}
@@ -403,7 +410,7 @@ func (s *Server) handlePutByTelegram(w http.ResponseWriter, r *http.Request, tid
 			s.writeError(w, http.StatusUnauthorized, "invalid_token", "S21 rejected admin credentials")
 			return
 		}
-		s.writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		s.writeInternalError(w, r, err)
 		return
 	}
 
@@ -418,14 +425,14 @@ func (s *Server) handlePutByTelegram(w http.ResponseWriter, r *http.Request, tid
 		UpdatedAt:     now,
 	})
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		s.writeInternalError(w, r, err)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, userFromStore(row))
 }
 
 func (s *Server) handleDeleteByTelegram(w http.ResponseWriter, r *http.Request, tid int64) {
-	if _, ok := s.authorize(w, r, "write"); !ok {
+	if _, _, ok := s.authorize(w, r, "write"); !ok {
 		return
 	}
 	if err := s.Store.Users().Delete(r.Context(), tid); err != nil {
@@ -433,7 +440,7 @@ func (s *Server) handleDeleteByTelegram(w http.ResponseWriter, r *http.Request, 
 			s.writeError(w, http.StatusNotFound, "not_found", "")
 			return
 		}
-		s.writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		s.writeInternalError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -483,7 +490,38 @@ func (s *Server) writeError(w http.ResponseWriter, status int, code, message str
 	s.writeJSON(w, status, ErrorBody{Code: code, Message: message})
 }
 
-func (s *Server) writeAuthError(w http.ResponseWriter, err error) {
+// constantTimeEqual reports whether two strings are equal without an
+// early exit on the first mismatched byte. Same shape as bytes.Equal
+// but timing-side-channel safe. Used on credential comparisons where a
+// remote attacker who can measure response latency would otherwise be
+// able to learn the secret byte-by-byte.
+func constantTimeEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// writeInternalError logs the full error server-side and responds with a
+// fixed generic message. Used for every 500 path so YDB / S21 / internal
+// diagnostics never leak to the caller. The opaque message gives the
+// operator one stable string to grep for in logs ("internal_error") while
+// the client has no useful surface to mine.
+func (s *Server) writeInternalError(w http.ResponseWriter, r *http.Request, cause error) {
+	if cause != nil {
+		log.Printf("internal error: %s %s: %v", r.Method, r.URL.Path, cause)
+	}
+	s.writeError(w, http.StatusInternalServerError, "internal_error",
+		"the service hit an internal error; the operator has been logged")
+}
+
+// writeAuthError translates an error returned from authenticate() /
+// authenticateAPIKey() / authorize() into the right HTTP response.
+//
+// The "named" auth errors are short static strings (no internals leak),
+// so we forward them verbatim — they're useful to the client (e.g. "your
+// X-Api-Key was revoked" vs "your X-S21-Token was rejected"). The
+// default branch is a fall-back for transport-level errors from S21 or
+// YDB, which DO carry internals — routed through writeInternalError to
+// log+sanitize.
+func (s *Server) writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, errMissingToken):
 		s.writeError(w, http.StatusUnauthorized, "missing_token", err.Error())
@@ -500,7 +538,7 @@ func (s *Server) writeAuthError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errAPIKeyScope):
 		s.writeError(w, http.StatusForbidden, "scope", err.Error())
 	default:
-		s.writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		s.writeInternalError(w, r, err)
 	}
 }
 
@@ -524,16 +562,45 @@ var validKeyName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
 // allowedScopes is the universe of acceptable scopes strings on a single key.
 // We canonicalise to one of these to keep the storage shape predictable and
-// the middleware check trivial (HasScope("read") vs HasScope("write")).
+// the middleware check trivial (HasScope("read") vs HasScope("write") vs
+// HasScope("admin")).
+//
+// Scope semantics:
+//
+//   - "read"  : list/lookup nickname records.
+//   - "write" : "read" plus mint/revoke YOUR OWN bot-side keys, register
+//               nicknames. The bots use this. Cannot enumerate or revoke
+//               keys belonging to other users.
+//   - "admin" : "read,write" plus unfiltered access — list ALL keys,
+//               revoke ANY key by name. Meant for the operator CLI; do
+//               NOT issue admin keys to the bots.
 var allowedScopes = map[string]string{
-	"read":       "read",
-	"write":      "read,write", // write implies read
-	"read,write": "read,write",
-	"write,read": "read,write",
+	"read":             "read",
+	"write":            "read,write", // write implies read
+	"read,write":       "read,write",
+	"write,read":       "read,write",
+	"admin":            "read,write,admin", // admin implies everything
+	"read,write,admin": "read,write,admin",
+	"admin,read,write": "read,write,admin",
 }
 
+// scopeAdmin is the operator-only scope. Used by handleListKeys and
+// handleRevokeKey to gate unfiltered access.
+const scopeAdmin = "admin"
+
+// keyCreateRateLimitWindow + keyCreateRateLimitMax define the per-user
+// rate limit on POST /admin/keys. Limits the create-revoke-create-revoke
+// abuse pattern: 10 creations per rolling hour is well above legitimate
+// "I lost my key, mint another" but bounds a compromised account's
+// ability to churn the table. CLI-minted keys (CreatedByTelegramID = 0)
+// are exempt — the operator is trusted.
+const (
+	keyCreateRateLimitWindow = time.Hour
+	keyCreateRateLimitMax    = 10
+)
+
 func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorize(w, r, "write"); !ok {
+	if _, _, ok := s.authorize(w, r, "write"); !ok {
 		return
 	}
 	var req CreateKeyRequest
@@ -548,12 +615,28 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 	canonScopes, scopesOK := allowedScopes[strings.TrimSpace(req.Scopes)]
 	if !scopesOK {
-		s.writeError(w, http.StatusBadRequest, "bad_request", "scopes must be one of: read, write, read,write")
+		s.writeError(w, http.StatusBadRequest, "bad_request",
+			"scopes must be one of: read, write, read,write, admin")
 		return
+	}
+	// Per-creator rate limit. Skip for CLI / operator-minted keys (tid=0).
+	if req.CreatedByTelegramID != 0 {
+		since := s.Now().Add(-keyCreateRateLimitWindow)
+		recent, err := s.Store.APIKeys().CountByCreatorSince(r.Context(), req.CreatedByTelegramID, since)
+		if err != nil {
+			s.writeInternalError(w, r, err)
+			return
+		}
+		if recent >= keyCreateRateLimitMax {
+			w.Header().Set("Retry-After", "3600")
+			s.writeError(w, http.StatusTooManyRequests, "rate_limited",
+				"too many key creations from this user; try again in an hour")
+			return
+		}
 	}
 	plaintext, err := generateAPIKey()
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		s.writeInternalError(w, r, err)
 		return
 	}
 	row := store.APIKey{
@@ -570,7 +653,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, store.ErrCreatorHasActiveKey):
 			s.writeError(w, http.StatusConflict, "creator_has_key", "this user already has an active key; revoke first")
 		default:
-			s.writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			s.writeInternalError(w, r, err)
 		}
 		return
 	}
@@ -582,13 +665,25 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRevokeKey revokes one API key by name.
+//
+// Two modes:
+//
+//   - With ?created_by=<tid>: scoped revoke. Authorized callers (any
+//     write-scope key) may revoke a key whose CreatedByTelegramID
+//     matches. RevokeByName enforces the match.
+//   - Without ?created_by: unscoped revoke (any key, any creator). Requires
+//     the "admin" scope. Without it, the request is rejected. Closes the
+//     S1 vuln where any write-scope user could revoke any operator key by
+//     guessing names.
 func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request, name string) {
-	if _, ok := s.authorize(w, r, "write"); !ok {
+	apiKey, _, ok := s.authorize(w, r, "write")
+	if !ok {
 		return
 	}
-	// Optional ?created_by=<telegram_id> filter — the bot uses this so a user
-	// can only revoke keys they themselves created. CLI omits it.
+	// Determine if the caller is asking for a scoped or unscoped revoke.
 	var by int64
+	scopedRevoke := false
 	if v := r.URL.Query().Get("created_by"); v != "" {
 		parsed, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
@@ -596,6 +691,12 @@ func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request, name st
 			return
 		}
 		by = parsed
+		scopedRevoke = true
+	}
+	if !scopedRevoke && !apiKey.HasScope(scopeAdmin) {
+		s.writeError(w, http.StatusForbidden, "scope",
+			"unscoped key revoke requires admin scope; pass ?created_by=<telegram_id> for self-service revoke")
+		return
 	}
 	err := s.Store.APIKeys().RevokeByName(r.Context(), name, by, s.Now().UTC())
 	if errors.Is(err, store.ErrNotFound) {
@@ -603,23 +704,52 @@ func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request, name st
 		return
 	}
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		s.writeInternalError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleListKeys returns API key metadata.
+//
+// Two modes (mirroring handleRevokeKey):
+//
+//   - With ?created_by=<tid>: returns keys whose CreatedByTelegramID
+//     matches. Anyone with write scope can do this.
+//   - Without ?created_by: returns ALL keys. Requires admin scope. Closes
+//     the S2 vuln where any write-scope user could enumerate operator
+//     keys.
 func (s *Server) handleListKeys(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorize(w, r, "write"); !ok {
+	apiKey, _, ok := s.authorize(w, r, "write")
+	if !ok {
+		return
+	}
+	filterCreator := int64(0)
+	filterEnabled := false
+	if v := r.URL.Query().Get("created_by"); v != "" {
+		parsed, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, "bad_request", "created_by must be integer")
+			return
+		}
+		filterCreator = parsed
+		filterEnabled = true
+	}
+	if !filterEnabled && !apiKey.HasScope(scopeAdmin) {
+		s.writeError(w, http.StatusForbidden, "scope",
+			"unfiltered key listing requires admin scope; pass ?created_by=<telegram_id> for self-service listing")
 		return
 	}
 	rows, err := s.Store.APIKeys().List(r.Context())
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		s.writeInternalError(w, r, err)
 		return
 	}
 	out := ListKeysResponse{Keys: make([]APIKeyInfo, 0, len(rows))}
 	for _, k := range rows {
+		if filterEnabled && k.CreatedByTelegramID != filterCreator {
+			continue
+		}
 		out.Keys = append(out.Keys, APIKeyInfo{
 			Name:                k.Name,
 			Scopes:              k.Scopes,

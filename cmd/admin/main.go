@@ -83,7 +83,7 @@ func main() {
 func runCreate(args []string) error {
 	fs := flag.NewFlagSet("create-key", flag.ExitOnError)
 	name := fs.String("name", "", "key name (required, 1–64 chars, [A-Za-z0-9_.-])")
-	scopes := fs.String("scopes", "read", "scope set: read | write | read,write")
+	scopes := fs.String("scopes", "read", "scope set: read | write | read,write | admin")
 	createdBy := fs.Int64("created-by", 0, "telegram_id of the owner (0 = CLI-minted, no owner)")
 	_ = fs.Parse(args)
 	if strings.TrimSpace(*name) == "" {
@@ -91,7 +91,7 @@ func runCreate(args []string) error {
 	}
 	canon, ok := canonicaliseScopes(*scopes)
 	if !ok {
-		return fmt.Errorf("--scopes must be one of: read, write, read,write (got %q)", *scopes)
+		return fmt.Errorf("--scopes must be one of: read, write, read,write, admin (got %q)", *scopes)
 	}
 
 	ctx := context.Background()
@@ -234,12 +234,20 @@ func fetchIAMToken(ctx context.Context) (string, error) {
 
 // canonicaliseScopes mirrors api.allowedScopes so the CLI and the HTTP path
 // store identical strings. Returns the canonical form + ok.
+//
+// Scope levels:
+//
+//   - read              — list/lookup nickname records
+//   - read,write        — read + register nicknames + manage YOUR OWN keys
+//   - read,write,admin  — read,write + list/revoke ANY key (operator-only)
 func canonicaliseScopes(s string) (string, bool) {
 	switch strings.TrimSpace(s) {
 	case "read":
 		return "read", true
 	case "write", "read,write", "write,read":
 		return "read,write", true
+	case "admin", "read,write,admin", "admin,read,write":
+		return "read,write,admin", true
 	}
 	return "", false
 }
