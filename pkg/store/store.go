@@ -32,6 +32,22 @@ type NicknameCacheEntry struct {
 	CachedAt      time.Time
 }
 
+// S21TokenCacheEntry is one row in the s21_token_cache table — a durable
+// record of "this X-S21-Token was validated against S21 and resolved to
+// this login; the entry is good until ExpiresAt". TokenHash is the
+// base64(sha256("login:password")) primary key — plaintext creds are
+// NEVER stored, only the hash.
+//
+// The durable cache exists because the Yandex Function container is
+// recycled after ~10–15 min idle, so the in-process LRU on its own
+// re-validates against S21 too often. Persisting hits to YDB means a
+// fresh container wakes up "already trusting" recent tokens.
+type S21TokenCacheEntry struct {
+	TokenHash string
+	Login     string
+	ExpiresAt time.Time
+}
+
 // APIKey is one row in api_keys. Authenticates a client (ttbot, identity-bot,
 // etc.) at the perimeter. Stored as sha256 of the plaintext — never plaintext.
 // Combined with X-S21-Token on every endpoint (defense in depth).
@@ -88,7 +104,23 @@ type Store interface {
 	Users() UserRepo
 	NicknameCache() NicknameCacheRepo
 	APIKeys() APIKeyRepo
+	S21TokenCache() S21TokenCacheRepo
 	Close() error
+}
+
+// S21TokenCacheRepo persists "this X-S21-Token (hashed) was accepted by
+// S21 and resolved to this login, valid until ExpiresAt". Read on every
+// inbound request before falling back to a live S21 round-trip; written
+// after a successful round-trip. Failures are never persisted — that
+// would lock out a user who fixed their password mid-window.
+type S21TokenCacheRepo interface {
+	// Get returns the row matching `tokenHash`. Returns ErrNotFound when
+	// nothing matches. The caller is responsible for the freshness check
+	// against ExpiresAt — the repo doesn't filter by time so the call
+	// site can log "expired hit, will revalidate" if it wants.
+	Get(ctx context.Context, tokenHash string) (S21TokenCacheEntry, error)
+	// Upsert writes (or overwrites) the row. Idempotent.
+	Upsert(ctx context.Context, e S21TokenCacheEntry) error
 }
 
 // APIKeyRepo persists issued API keys. Keys are stored only as sha256(plaintext)

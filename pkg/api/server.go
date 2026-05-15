@@ -21,10 +21,10 @@ import (
 
 // s21TokenCacheTTL is how long a previously-validated X-S21-Token stays
 // trusted before the next request bearing it triggers a fresh S21 round-
-// trip. Long enough to amortize the slow auth call across many requests
-// from the same client; short enough that a rotated password takes effect
-// within one day at most.
-const s21TokenCacheTTL = 24 * time.Hour
+// trip. With the YDB-backed durable layer behind the in-memory LRU, this
+// also bounds how long a since-rotated S21 password keeps working through
+// identity-service. 30 days is the operator's risk/reuse tradeoff.
+const s21TokenCacheTTL = 30 * 24 * time.Hour
 
 // Server hosts the HTTP API. Construct with New, mount Routes onto any
 // net/http handler, or call ServeHTTP directly.
@@ -182,11 +182,16 @@ func matchAdminKey(p string) (string, bool) {
 // "login:password", and validates the pair against S21. Returns the
 // resolved admin login on success.
 //
-// Performance: the S21TokenCache fronts the S21 round-trip. A token that
-// has already been validated within the last s21TokenCacheTTL skips the
-// `s.S21.Authenticate` call entirely (the cache stores only the resolved
-// login, never the password — the map key is a sha256 hash of the
-// "login:password" string).
+// Performance: two cache layers front the S21 round-trip.
+//  1. In-memory LRU (S21Tokens). Per-container, lost on cold start; ~ns
+//     lookup; serves the hot path between cold starts.
+//  2. YDB-backed durable cache (Store.S21TokenCache). Shared across all
+//     warm containers and survives redeploys; ~ms lookup; serves the
+//     warmth gap when Yandex recycles an idle container.
+// On an in-memory miss we consult YDB. If YDB has a fresh row we promote
+// it into the in-memory layer so the next request stays fast. Only after
+// both layers miss do we call S21, and on success we write through to
+// both layers.
 //
 // Failures are NEVER cached. If S21 currently rejects the creds we want
 // the next request — possibly carrying corrected creds — to retry.
@@ -201,14 +206,33 @@ func (s *Server) authenticate(ctx context.Context, r *http.Request) (string, err
 	}
 	login, password := tok[:colon], tok[colon+1:]
 
-	// Fast path: cached, fresh validation. The login comparison is
-	// constant-time to avoid a timing-side-channel leak of the resolved
-	// login string. (The map key is already a hash, so the cache itself
-	// doesn't leak login length / prefix — but the post-lookup equality
-	// check on the recovered plaintext login would, without this.)
+	// Fast path: in-memory cache. The login comparison is constant-time
+	// to avoid a timing-side-channel leak of the resolved login string.
+	// (The map key is already a hash, so the cache itself doesn't leak
+	// login length / prefix — but the post-lookup equality check on the
+	// recovered plaintext login would, without this.)
 	if s.S21Tokens != nil {
 		if cachedLogin, ok := s.S21Tokens.Get(tok); ok && constantTimeEqual(cachedLogin, login) {
 			return cachedLogin, nil
+		}
+	}
+
+	// Warm path: durable YDB cache. Only useful when the in-memory layer
+	// missed (cold start, eviction, or a parallel container that hasn't
+	// seen this token yet). On hit, promote into the in-memory cache so
+	// the next request from this container stays fast.
+	if s.Store != nil {
+		if entry, err := s.Store.S21TokenCache().Get(ctx, hashToken(tok)); err == nil {
+			if s.Now().Before(entry.ExpiresAt) && constantTimeEqual(entry.Login, login) {
+				if s.S21Tokens != nil {
+					s.S21Tokens.Put(tok, entry.Login)
+				}
+				return entry.Login, nil
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			// Don't fail the request on a cache I/O hiccup — log and
+			// fall through to live S21. The cache is best-effort.
+			log.Printf("s21_token_cache: durable read failed: %v", err)
 		}
 	}
 
@@ -218,8 +242,19 @@ func (s *Server) authenticate(ctx context.Context, r *http.Request) (string, err
 		}
 		return "", err
 	}
+	expiresAt := s.Now().Add(s21TokenCacheTTL)
 	if s.S21Tokens != nil {
 		s.S21Tokens.Put(tok, login)
+	}
+	if s.Store != nil {
+		if err := s.Store.S21TokenCache().Upsert(ctx, store.S21TokenCacheEntry{
+			TokenHash: hashToken(tok),
+			Login:     login,
+			ExpiresAt: expiresAt,
+		}); err != nil {
+			// Same best-effort posture as reads — never fail the request.
+			log.Printf("s21_token_cache: durable write failed: %v", err)
+		}
 	}
 	return login, nil
 }

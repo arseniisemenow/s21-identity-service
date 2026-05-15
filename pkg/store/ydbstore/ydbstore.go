@@ -50,6 +50,7 @@ func (s *Store) Close() error {
 func (s *Store) Users() store.UserRepo                  { return userRepo{s} }
 func (s *Store) NicknameCache() store.NicknameCacheRepo { return cacheRepo{s} }
 func (s *Store) APIKeys() store.APIKeyRepo              { return apiKeyRepo{s} }
+func (s *Store) S21TokenCache() store.S21TokenCacheRepo { return tokenCacheRepo{s} }
 
 func (s *Store) doTx(ctx context.Context, fn func(ctx context.Context, tx table.TransactionActor) error) error {
 	return s.driver.Table().DoTx(ctx, fn, table.WithIdempotent(),
@@ -498,4 +499,50 @@ func (r apiKeyRepo) CountByCreatorSince(ctx context.Context, by int64, since tim
 		return nil
 	})
 	return count, err
+}
+
+// ---------------- s21 token cache ----------------
+
+type tokenCacheRepo struct{ s *Store }
+
+func (r tokenCacheRepo) Get(ctx context.Context, hash string) (store.S21TokenCacheEntry, error) {
+	var e store.S21TokenCacheEntry
+	err := r.s.doRO(ctx, func(ctx context.Context, sess table.Session) error {
+		_, res, err := sess.Execute(ctx, table.DefaultTxControl(),
+			"DECLARE $h AS Utf8; SELECT token_hash, login, expires_at FROM s21_token_cache WHERE token_hash = $h;",
+			table.NewQueryParameters(table.ValueParam("$h", types.UTF8Value(hash))))
+		if err != nil {
+			return err
+		}
+		defer res.Close()
+		if err := res.NextResultSetErr(ctx); err != nil {
+			return err
+		}
+		if !res.NextRow() {
+			return store.ErrNotFound
+		}
+		return res.ScanNamed(
+			named.Required("token_hash", &e.TokenHash),
+			named.Required("login", &e.Login),
+			named.Required("expires_at", &e.ExpiresAt),
+		)
+	})
+	return e, err
+}
+
+func (r tokenCacheRepo) Upsert(ctx context.Context, e store.S21TokenCacheEntry) error {
+	const sql = `
+DECLARE $h AS Utf8;
+DECLARE $login AS Utf8;
+DECLARE $exp AS Timestamp;
+UPSERT INTO s21_token_cache (token_hash, login, expires_at)
+VALUES ($h, $login, $exp);`
+	return r.s.doTx(ctx, func(ctx context.Context, tx table.TransactionActor) error {
+		_, err := tx.Execute(ctx, sql, table.NewQueryParameters(
+			table.ValueParam("$h", types.UTF8Value(e.TokenHash)),
+			table.ValueParam("$login", types.UTF8Value(e.Login)),
+			table.ValueParam("$exp", types.TimestampValueFromTime(e.ExpiresAt.UTC())),
+		))
+		return err
+	})
 }

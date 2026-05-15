@@ -97,6 +97,36 @@ resource "yandex_ydb_table" "api_keys" {
   primary_key = ["key_hash"]
 }
 
+# s21_token_cache — durable memoization of "this X-S21-Token (hashed) has
+# been validated against S21 and resolved to this login, valid until
+# expires_at". Read on every inbound request before the in-memory LRU
+# falls back to a live S21 round-trip; written after a successful round-
+# trip. token_hash is base64(sha256("login:password")) — the plaintext
+# creds are NEVER persisted, only the hash. Failures are never cached.
+# TTL is 30 days, enforced by the Go layer reading expires_at.
+resource "yandex_ydb_table" "s21_token_cache" {
+  path              = "s21_token_cache"
+  connection_string = local.ydb_conn
+
+  column {
+    name     = "token_hash"
+    type     = "Utf8"
+    not_null = true
+  }
+  column {
+    name     = "login"
+    type     = "Utf8"
+    not_null = true
+  }
+  column {
+    name     = "expires_at"
+    type     = "Timestamp"
+    not_null = true
+  }
+
+  primary_key = ["token_hash"]
+}
+
 # s21_nickname_cache — lazy cache of "this S21 login has been validated".
 resource "yandex_ydb_table" "s21_nickname_cache" {
   path              = "s21_nickname_cache"

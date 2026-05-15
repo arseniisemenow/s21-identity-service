@@ -14,27 +14,30 @@ import (
 
 // Store is the in-memory store.
 type Store struct {
-	mu        sync.Mutex
-	users     map[int64]store.User
-	nicknames map[string]store.NicknameCacheEntry
-	apiKeys   map[string]store.APIKey // keyed by KeyHash
+	mu          sync.Mutex
+	users       map[int64]store.User
+	nicknames   map[string]store.NicknameCacheEntry
+	apiKeys     map[string]store.APIKey // keyed by KeyHash
+	tokenCache  map[string]store.S21TokenCacheEntry
 }
 
 // New returns an empty memstore.
 func New() *Store {
 	return &Store{
-		users:     map[int64]store.User{},
-		nicknames: map[string]store.NicknameCacheEntry{},
-		apiKeys:   map[string]store.APIKey{},
+		users:      map[int64]store.User{},
+		nicknames:  map[string]store.NicknameCacheEntry{},
+		apiKeys:    map[string]store.APIKey{},
+		tokenCache: map[string]store.S21TokenCacheEntry{},
 	}
 }
 
 // Close is a no-op.
 func (s *Store) Close() error { return nil }
 
-func (s *Store) Users() store.UserRepo                  { return userRepo{s} }
-func (s *Store) NicknameCache() store.NicknameCacheRepo { return cacheRepo{s} }
-func (s *Store) APIKeys() store.APIKeyRepo              { return apiKeyRepo{s} }
+func (s *Store) Users() store.UserRepo                    { return userRepo{s} }
+func (s *Store) NicknameCache() store.NicknameCacheRepo   { return cacheRepo{s} }
+func (s *Store) APIKeys() store.APIKeyRepo                { return apiKeyRepo{s} }
+func (s *Store) S21TokenCache() store.S21TokenCacheRepo   { return tokenCacheRepo{s} }
 
 // ---------------- users ----------------
 
@@ -199,4 +202,25 @@ func (r apiKeyRepo) CountByCreatorSince(_ context.Context, by int64, since time.
 		}
 	}
 	return count, nil
+}
+
+// ---------------- s21 token cache ----------------
+
+type tokenCacheRepo struct{ s *Store }
+
+func (r tokenCacheRepo) Get(_ context.Context, hash string) (store.S21TokenCacheEntry, error) {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	e, ok := r.s.tokenCache[hash]
+	if !ok {
+		return store.S21TokenCacheEntry{}, store.ErrNotFound
+	}
+	return e, nil
+}
+
+func (r tokenCacheRepo) Upsert(_ context.Context, e store.S21TokenCacheEntry) error {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	r.s.tokenCache[e.TokenHash] = e
+	return nil
 }
