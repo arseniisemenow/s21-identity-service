@@ -2,7 +2,7 @@ module github.com/arseniisemenow/s21-identity-service/terraform/function
 
 go 1.23.0
 
-require github.com/arseniisemenow/s21-identity-service v0.5.0
+require github.com/arseniisemenow/s21-identity-service v0.6.0
 
 require (
 	github.com/arseniisemenow/s21auto-client-go v0.3.2 // indirect
